@@ -92,7 +92,7 @@ const NO_DEVICE: Record<HandoffTo, string> = {
 // ── POST /calls/:id/handoff ─────────────────────────────────────────────────────────
 
 export async function startHandoff(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
   env = await callerTwilioEnv(env, c);
   const body = await readJson(req);
@@ -191,7 +191,7 @@ function whichApp(req: Request): "extension" | "mobile" {
 }
 
 export async function cancelHandoff(env: Env, req: Request, idParam: string): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
   env = await callerTwilioEnv(env, c);
   const body = await readJson(req);
@@ -219,7 +219,7 @@ export async function cancelHandoff(env: Env, req: Request, idParam: string): Pr
 // ── GET /calls/:id/handoff ──────────────────────────────────────────────────────────
 
 export async function handoffStatus(env: Env, req: Request, idParam: string): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   const call = await myCall(c, idParam, true);
   return ok({ ...(await moveStateOf(c.admin, call)), call_id: call.id });
 }
@@ -234,7 +234,7 @@ type PendingRow = CallRow & { crm_contacts: { name: string | null } | { name: st
  * health check. The newest wins if there were ever two (two calls at once).
  */
 export async function pendingHandoff(env: Env, req: Request): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   const forDevice = new URL(req.url).searchParams.get("for") ?? "chrome";
   if (!isHandoffTo(forDevice)) throw new ApiError("bad_request", "Say which device is asking.");
   const now = Date.now();

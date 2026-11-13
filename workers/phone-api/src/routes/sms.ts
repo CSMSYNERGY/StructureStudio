@@ -32,8 +32,27 @@ import { logFault } from "../log";
 import { WALLET_WORDS } from "../wallet";
 import { GUARD_WORDS, guardedNumberAllowed, guardFor, logGuardRefusal } from "../dialGuard";
 import { mayReadUnknownNumbers, maySendToContacts, narrowedToOwn, visibleContactIds } from "../scope";
+import { planRefuses, SMS_TAB } from "../plan";
 
 const TEMP_ID_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * What an app is told when the company's plan has no texting (../plan.ts, block mode, the `sms`
+ * tab not on). The installed apps cannot be given a new code, so this borrows one they already
+ * know and carries its own sentence, which both apps show as it is on the text that was not sent:
+ *   number_not_registered (409)  "texting is not available to this business", the nearest meaning,
+ *     and the one refusal neither app hangs a button or a banner on. Being a 4xx other than 402,
+ *     the phone app keeps the text as refused for sure (not "not sure it went out") and does not
+ *     raise the wallet banner; the extension does not report it as a fault (it is in its expected
+ *     list).
+ * Not not_your_customer (the phone app offers "Save as contact" under it on a number's thread),
+ * not no_consent ("Customer agreed to texts" in both apps), and never phone_off (it is how both
+ * apps learn the whole line is off).
+ */
+export const NO_TEXTING_PLAN = {
+  code: "number_not_registered",
+  message: "Texting isn't part of your plan. Ask Structure Studio to add it.",
+} as const satisfies { code: ErrorCode; message: string };
 
 /**
  * A refused send, in the SPEC's codes and plain English. smsSend's own sentences are kept,
@@ -77,6 +96,14 @@ export function sentVia(req: Request): "extension" | "mobile" {
 
 export async function sendSms(env: Env, ec: Ctx, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
+  // ── THE PLAN'S TEXTING TAB (../plan.ts) ─────────────────────────────────────────────
+  // Before anything about the message is looked at, and long before sendTenantSms: a company whose
+  // plan map is enforced and has no `sms` tab sends no text. requireCaller read the plan (c.plan);
+  // nothing more is asked here. Report mode refuses nothing and files a row; no plan answer is the
+  // rules below, unchanged. A text coming IN is sms-inbound's and is never refused by a plan.
+  if (await planRefuses(c.plan, c.ctx.client_id, "sms_send", SMS_TAB)) {
+    throw new ApiError(NO_TEXTING_PLAN.code, NO_TEXTING_PLAN.message);
+  }
   const body = await readJson(req);
   // Photos cannot be SENT yet: the shared sendTenantSms has no media parameter (twilioSms.ts
   // posts Body only), and a second send path would be a second set of texting rules. Refused

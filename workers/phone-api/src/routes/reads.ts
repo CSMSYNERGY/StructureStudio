@@ -27,6 +27,7 @@ import { switchUnderWay } from "../handoff";
 import { ApiError, ok, pathParam, readJson, UUID_RE } from "../http";
 import { phoneDigits, toE164, toIdentity } from "../identity";
 import { logFault } from "../log";
+import { CONTACTS_TAB, planRefuses } from "../plan";
 import { callIsMine, isTeamLevel, mayReadUnknownNumbers, maySendToContacts, narrowedToOwn, phoneLevelOf, visibleContactIds } from "../scope";
 
 const PAGE = 50;
@@ -745,6 +746,11 @@ export const DIRECTORY_READ = 60;
 export async function search(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
   if (c.ctx.contacts_level === "none") return ok({ contacts: [] });
+  // The plan's `contacts` tab (../plan.ts): without it (block mode) the answer is the one just
+  // above, an empty list, which the apps already draw. Report mode files a row and carries on.
+  // Only this search and GET /contacts ask: threads, their search and sending never do, so a plan
+  // with the phone and texting but no contact list still texts.
+  if (await planRefuses(c.plan, c.ctx.client_id, "contacts_search", CONTACTS_TAB)) return ok({ contacts: [] });
   const url = new URL(req.url);
   const raw = url.searchParams.get("q") ?? "";
   const withEmail = url.searchParams.get("email") === "1";
@@ -1196,6 +1202,8 @@ function contactsOffset(url: URL): number {
 export async function listContacts(env: Env, req: Request): Promise<Response> {
   const c = await requireCaller(env, req);
   if (c.ctx.contacts_level === "none") return ok({ contacts: [] });
+  // The plan's `contacts` tab (../plan.ts), as in `search` above: no tab, no list.
+  if (await planRefuses(c.plan, c.ctx.client_id, "contacts_list", CONTACTS_TAB)) return ok({ contacts: [] });
   const from = contactsOffset(new URL(req.url));
 
   type Row = { id: string; name: string | null; phone: string | null; phone_digits: string | null; email: string | null };

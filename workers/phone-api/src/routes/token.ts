@@ -27,6 +27,7 @@ import { logFault } from "../log";
 import { armedFor, callTranscribeOn } from "../recording";
 import { transcribeOn } from "../voicemail";
 import { maySendToContacts } from "../scope";
+import { PHONE_TAB, emergencyWindowOpen, planFor, planNamedSoon, planRefuses } from "../plan";
 import { requestAutoTopup, walletFloorCheck, walletStateOf, type WalletState } from "../wallet";
 import { greetingOut } from "./me";
 import { onDnd } from "./voice";
@@ -75,6 +76,8 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
   const claims = await verifySupabaseJwt(env, jwt);
   const admin = adminClient(env);
 
+  // Plans as data (../plan.ts): "is anybody on a plan map" travels with the round below.
+  const named = planNamedSoon(admin);
   const [ctx, settingsRes, consentRes, alive] = await Promise.all([
     callerContext(admin, claims.sub),
     // ⚠️ dnd_cover_user_id, ring_hours, ring_hours_tz and the greeting columns are migration 264's:
@@ -91,6 +94,28 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
   }
   if (!ctx || ctx.phone_level === "none") throw new ApiError("no_phone_access");
   if (ctx.phone_status !== "on") throw new ApiError("phone_off");
+  // ── THE PLAN (../plan.ts), the same check requireCaller makes (context.ts) ───────────
+  // Block mode with the `phone` tab not on: no line is minted, and the apps are told phone_off,
+  // which both already show as their "not switched on for your business" screen. Report mode
+  // refuses nothing and files a row. No plan answer (nobody named, or a failed read): as before.
+  // A read that passes its bound mints by the old rules and is left to finish under waitUntil, as
+  // on the two call webhooks, so the next /token finds the answer instead of waiting again.
+  const plan = await planFor(admin, ctx.client_id, { named, keep: (read) => ec.waitUntil(read) });
+  // ⚠️ NEVER INSIDE THIS PERSON'S 911 CALLBACK WINDOW. For 60 minutes after they dialed 911 the
+  // dispatcher's callback rings only them, on the line minted here, and a line lasts that same
+  // hour (TOKEN_TTL): refused a fresh one, their phone could not ring for the callback. Asked only
+  // once the plan is about to refuse, so no other /token pays the read; a read that fails or is
+  // slow does not refuse (emergencyWindowOpen).
+  if (await planRefuses(plan, ctx.client_id, "token", PHONE_TAB) && !(await emergencyWindowOpen(admin, ctx.client_id, claims.sub))) {
+    throw new ApiError("phone_off");
+  }
+  // ⚠️ THE `sms` TAB IS NOT ASKED HERE, and user.can_text_contacts below never follows the plan.
+  // In both installed apps that flag means "has Contacts edit access", and far more than the text
+  // box hangs on it: emailing a customer, New message, Save as contact, "Customer agreed to
+  // texts", and the sentence that tells the person to ask their owner for Contacts edit access.
+  // Lowering it for a company with no texting took all of that from one that has email and its
+  // contact list. A plan with no texting is refused where the text is sent (/sms/send, in the
+  // Worker's own words), and nowhere else.
   if (consentRes.error) {
     ec.waitUntil(logFault({
       code: "ai_consent_unreadable", severity: "warn", throttleMs: 10 * 60_000,
@@ -174,7 +199,8 @@ export async function token(env: Env, ec: Ctx, req: Request): Promise<Response> 
       own_contacts_only: ctx.own_contacts_only,
       // May they text a SAVED contact? The rule /sms/send checks first, so an app can hide the
       // composer on a customer's thread instead of letting Send fail. Replies to an unknown number
-      // that texted first follow a different rule (sms.ts) and do not read this.
+      // that texted first follow a different rule (sms.ts) and do not read this. The person's own
+      // access and nothing else: never the company's plan (see the note above).
       can_text_contacts: maySendToContacts(ctx),
     },
     // The number this person's calls show: their own number when the business gave them one

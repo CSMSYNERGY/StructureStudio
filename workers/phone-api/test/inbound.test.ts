@@ -3,7 +3,7 @@ import { inRingHours, isOpen } from "../src/hours";
 import { awayFromSettings, isAway, offHours } from "../src/routes/voice";
 import {
   BUSINESS_NUMBER, CALL_SID, CLIENT, CONTACT_1, CUSTOMER, FakeNet, NUMBER_ID, USER_A, USER_B, USER_C,
-  attr, call, clientsIn, filter, makeEnv, member, numbersIn, routeInfo, twilioPost,
+  attr, blockPlan, call, clientsIn, filter, makeEnv, member, numbersIn, routeInfo, twilioPost,
 } from "./helpers";
 
 const id = (u: string, g = 1) => `u_${u.replace(/-/g, "")}_g${g}`;
@@ -207,6 +207,21 @@ describe("/voice/inbound routing", () => {
     const { text } = await ringIn();
     expect(clientsIn(text)).toEqual([id(USER_C, 3)]);
     expect(filter(net.reads("phone_user_settings")[0], "user_id")).toBe(USER_C);
+  });
+
+  // Plans as data (src/plan.ts). The whole of it, with report mode and failed reads, is test/plan.test.ts.
+  it("takes a voicemail the same way when the company's enforced plan has no phone tab", async () => {
+    const net = blockPlan(setup(routeInfo({ members: [member(USER_A)] })), { phone: "hidden" });
+    const { text } = await ringIn();
+    expect(text).toContain("<Record");
+    expect(text).not.toContain("can't take calls right now");
+    expect(clientsIn(text)).toEqual([]);
+    expect(net.writes("phone_calls", "POST")[0].json).toMatchObject({ direction: "in", rang_user_ids: [] });
+  });
+
+  it("the 911 callback rings through a plan with no phone tab, as it does through every switch", async () => {
+    blockPlan(setup(routeInfo({ recent_emergency_user: USER_B, members: [member(USER_A), member(USER_B)] })), { phone: "hidden" });
+    expect(clientsIn((await ringIn()).text)).toEqual([id(USER_B)]);
   });
 
   it("takes a voicemail (and keeps the row) when the switch is off; nobody rings", async () => {

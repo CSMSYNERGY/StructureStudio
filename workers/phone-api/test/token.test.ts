@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { mintAccessToken, pushCredentialFor } from "../src/accessToken";
 import { b64urlDecodeJson } from "../src/b64";
-import { Auth, FakeNet, NUMBER_ID, SUPABASE_URL, USER_A, USER_C, appRequest, call, callerCtx, filter, jsonRes, makeEnv } from "./helpers";
+import { Auth, FakeNet, NUMBER_ID, SUPABASE_URL, USER_A, USER_C, appRequest, blockPlan, call, callerCtx, filter, jsonRes, makeEnv } from "./helpers";
 import { businessNumbersOf, callerContext, type Admin } from "../src/db";
 
 const HEX_A = USER_A.replace(/-/g, "");
@@ -105,6 +105,30 @@ describe("POST /token", () => {
     const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "android", build_type: "prod", app_version: "1" }));
     expect(res.status).toBe(200);
     expect(json.user.can_text_contacts).toBe(can);
+  });
+
+  // Plans as data (src/plan.ts). The whole of it, with report mode and failed reads, is test/plan.test.ts.
+  // In the installed apps can_text_contacts means "has Contacts edit access": email, New message and
+  // Save as contact hang on it too, so it is the person's own access and never the plan's sms tab.
+  it("an enforced plan with no texting still mints the line, and can_text_contacts stays the person's own access", async () => {
+    const { net, auth, env } = await setup();
+    blockPlan(net, { sms: "hidden" });
+    const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod" }));
+    expect(res.status).toBe(200);
+    expect(json.user.can_text_contacts).toBe(true);
+  });
+
+  it("an enforced plan with no phone tab is refused phone_off, the code both apps already show", async () => {
+    const { net, auth, env } = await setup();
+    blockPlan(net, { phone: "hidden" });
+    // Before it refuses, /token looks for this person's own 911 call in the last 60 minutes (the
+    // callback window, plan.ts emergencyWindowOpen): there is none. Left unserved, that read would
+    // fail, and a failed read never refuses.
+    net.rest("GET", "phone_calls", () => []);
+    const { res, json } = await call(env, appRequest("POST", "/token", await auth.token(USER_A), { platform: "ios", build_type: "prod" }));
+    expect(res.status).toBe(403);
+    expect(json.error.code).toBe("phone_off");
+    expect(net.unmatched).toEqual([]);
   });
 
   // contacts:'own_view' (migration 286): own customers, view only. The apps hide the composer on

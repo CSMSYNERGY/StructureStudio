@@ -163,7 +163,7 @@ async function keepCustomerHeld(env: Env, ec: Ctx, c: Caller, call: CallRow): Pr
 // ── POST /calls/:id/hold ────────────────────────────────────────────────────────────
 
 export async function hold(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
   env = await callerTwilioEnv(env, c);
   const call = await liveCallOf(c, idParam);
@@ -234,7 +234,7 @@ export async function hold(env: Env, ec: Ctx, req: Request, idParam: string): Pr
 // ── POST /calls/:id/resume ──────────────────────────────────────────────────────────
 
 export async function resume(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
   env = await callerTwilioEnv(env, c);
   const call = await liveCallOf(c, idParam);
@@ -298,7 +298,7 @@ export async function resume(env: Env, ec: Ctx, req: Request, idParam: string): 
  * their own goes to voicemail (conference.ts warmLegStatus).
  */
 export async function warmTransfer(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
   env = await callerTwilioEnv(env, c);
   const body = await readJson(req);

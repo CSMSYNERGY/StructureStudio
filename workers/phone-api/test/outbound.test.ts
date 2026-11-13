@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BUSINESS_NUMBER, CALL_SID, CLIENT, CONTACT_1, CUSTOMER, FakeNet, NUMBER_ID, USER_A,
-  attr, call, callerCtx, filter, makeEnv, numbersIn, twilioPost,
+  attr, blockPlan, call, callerCtx, filter, makeEnv, numbersIn, twilioPost,
 } from "./helpers";
 
 const IDENTITY_A = `client:u_${USER_A.replace(/-/g, "")}_g1`;
@@ -149,6 +149,17 @@ describe("/voice/outbound", () => {
       expect(text).toContain(words);
     },
   );
+
+  // Plans as data (src/plan.ts). The whole of it, with report mode and failed reads, is test/plan.test.ts.
+  it("a company whose enforced plan has no phone tab hears the switch's sentence and leaves no call row; 911 still dials", async () => {
+    const net = blockPlan(setup(), { phone: "hidden" });
+    const { text } = await dialOut();
+    expect(text).toContain("isn't switched on");
+    expect(text).toContain("<Hangup/>");
+    expect(text).not.toContain("<Dial");
+    expect(net.writes("phone_calls")).toEqual([]);
+    expect(numbersIn((await dialOut(makeEnv({ EMERGENCY_MODE: "allow" }), { To: "911" })).text)).toEqual(["911"]);
+  });
 
   it("refuses an identity that isn't one of ours", async () => {
     setup();

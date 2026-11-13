@@ -81,7 +81,7 @@ async function transferCover(c: Caller, coverId: unknown, routeTz: string): Prom
  * still on the call.
  */
 export async function transfer(env: Env, ec: Ctx, req: Request, idParam: string): Promise<Response> {
-  const c = await requireCaller(env, req);
+  const c = await requireCaller(env, req, { plan: false });
   // Workstream 2, phase 5: this business's Twilio account (its sub-account's, or the parent's).
   env = await callerTwilioEnv(env, c);
   const body = await readJson(req);

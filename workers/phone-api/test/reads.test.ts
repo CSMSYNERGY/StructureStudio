@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CONTACT_2, CUSTOMER, FakeNet, USER_A, USER_B, USER_C,
-  appRequest, call, callerCtx, eventRows, filter, jsonRes, makeEnv, phoneListSearch, supabaseUrls, type Seen,
+  appRequest, blockPlan, call, callerCtx, eventRows, filter, jsonRes, makeEnv, phoneListSearch, supabaseUrls, type Seen,
 } from "./helpers";
 
 const T = (min: number) => new Date(Date.UTC(2026, 8, 29, 12, 0) - min * 60_000).toISOString();
@@ -1234,6 +1234,19 @@ describe("GET /contacts, everyone A-Z for the phone app's Contacts tab (2026-10-
     const { res, json } = await call(env, appRequest("GET", "/contacts", token));
     expect(res.status).toBe(500);
     expect(json.error.code).toBe("internal");
+  });
+
+  // Plans as data (src/plan.ts). The whole of it, with report mode and failed reads, is test/plan.test.ts.
+  it("a company whose enforced plan has no contacts tab gets the empty list of someone with no contacts access, here and in /search", async () => {
+    const { net, token, env } = await setup(callerCtx());
+    blockPlan(net, { contacts: "hidden" });
+    net.rest("GET", "crm_contacts", table(ROWS));
+    const list = await call(env, appRequest("GET", "/contacts", token));
+    expect([list.res.status, list.json]).toEqual([200, { ok: true, contacts: [] }]);
+    const found = await call(env, appRequest("GET", "/search?q=avery", token));
+    expect([found.res.status, found.json]).toEqual([200, { ok: true, contacts: [] }]);
+    expect(net.reads("crm_contacts")).toEqual([]);
+    expect(net.rpcCalls("phone_list_search")).toEqual([]);
   });
 });
 

@@ -95,7 +95,14 @@ interface Route {
 }
 
 export class FakeNet {
-  routes: Route[] = [];
+  // Plans as data (src/plan.ts): the one read every app route and both call webhooks now start is
+  // "who is named" (the access_config row). Answered here as NO ROW, which names nobody, so a test
+  // that is not about plans meets the world as it is today instead of an unmatched 500. It sits
+  // first, and the last route registered wins, so `servePlan` (below) or a test's own
+  // net.rest("GET", "access_config", ...) overrides it. The request is still in `seen`.
+  routes: Route[] = [
+    { method: "GET", kind: "rest", test: (u) => u.origin === SUPABASE_URL && u.pathname === "/rest/v1/access_config", reply: () => [] },
+  ];
   seen: Seen[] = [];
   unmatched: Seen[] = [];
 
@@ -204,7 +211,7 @@ export function eventRows(rows: EventFixture[]): Reply {
 }
 
 // ── A table that answers the way PostgREST would (list search, 2026-10-13) ──────────
-// Honours what the Worker sends: eq, lt, gte, is.null, not.is.null, in, cs, like and ilike;
+// Honours what the Worker sends: eq, lt, gt, gte, is.null, not.is.null, in, cs, like and ilike;
 // `or` (and `and(...)` / `or(...)` nested inside it); filters on an embedded table
 // (`crm_contacts.name=ilike.*jo*`), which with `!inner` in the select drop the parent row; and
 // order, offset and limit. Rows carry their embeds as plain keys (crm_contacts, phone_voicemails).
@@ -241,6 +248,7 @@ export function pgHolds(val: unknown, expr: string): boolean {
   const arg = expr.slice(i + 1);
   if (op === "eq") return val != null && String(val) === arg;
   if (op === "lt") return val != null && String(val) < arg;
+  if (op === "gt") return val != null && String(val) > arg;
   if (op === "gte") return val != null && String(val) >= arg;
   if (op === "in") return val != null && splitTop(arg.slice(1, -1)).map(unquoteValue).includes(String(val));
   if (op === "cs") return Array.isArray(val) && arg.slice(1, -1).split(",").every((x) => (val as unknown[]).map(String).includes(x));
@@ -510,6 +518,42 @@ export function routeInfo(over: Record<string, unknown> = {}, route: Record<stri
     recent_emergency_user: null,
     ...over,
   };
+}
+
+// ── Plans as data (src/plan.ts, migrations 386 to 388) ──────────────────────────────
+
+/** A whole tab map with everything on, less what `over` says. Only the keys the Worker reads matter. */
+export function planModules(over: Record<string, string> = {}): Record<string, string> {
+  return { contacts: "on", phone: "on", sms: "on", conversations: "on", email: "on", ...over };
+}
+
+/**
+ * Name companies on the server switch and answer access_for_server the way migration 388 does:
+ * `enforce` is the access_config row's value, `maps` each company's tab map (planModules). A
+ * company the value does not name gets null, as it does live.
+ */
+export function servePlan(net: FakeNet, enforce: Record<string, unknown>, maps: Record<string, Record<string, string>> = {}): FakeNet {
+  net.rest("GET", "access_config", () => [{ value: enforce }]);
+  net.rpc("access_for_server", (s) => {
+    const id = String(s.json?.p_client_id ?? "");
+    const has = (k: string) => Array.isArray(enforce[k]) && (enforce[k] as unknown[]).includes(id);
+    const mode = enforce.server_all === true || has("server_clients") ? "block" : has("server_report") ? "report" : null;
+    return mode ? { mode, modules: maps[id] ?? planModules() } : null;
+  });
+  return net;
+}
+
+/** The demo tenant in block mode with this tab map. */
+export const blockPlan = (net: FakeNet, over: Record<string, string> = {}) =>
+  servePlan(net, { server_clients: [CLIENT] }, { [CLIENT]: planModules(over) });
+
+/** The demo tenant in report mode with this tab map. */
+export const reportPlan = (net: FakeNet, over: Record<string, string> = {}) =>
+  servePlan(net, { server_report: [CLIENT] }, { [CLIENT]: planModules(over) });
+
+/** The report-mode rows a test's requests filed (app_errors, code module_would_refuse). */
+export function wouldRefuseRows(net: FakeNet): any[] {
+  return net.writes("app_errors").map((s) => s.json).filter((r) => r?.code === "module_would_refuse");
 }
 
 // ── Requests ────────────────────────────────────────────────────────────────────────

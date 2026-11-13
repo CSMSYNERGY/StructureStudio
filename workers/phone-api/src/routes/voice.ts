@@ -34,6 +34,7 @@ import { hook } from "../urls";
 import { voicemailTwiml, type VoicemailFor } from "../voicemail";
 import { requestAutoTopup, WALLET_WORDS, walletFloorCheck } from "../wallet";
 import { tenantMatchesWebhook, tenantVerdictForWebhook } from "../twilioAccount";
+import { PHONE_TAB, planFor, planNamedSoon, planReport, planVerdict, VOICE_PLAN_MS } from "../plan";
 import {
   cellForwardAllowed, GUARD_WORDS, guardedNumberAllowed, guardFor, logGuardRefusal, minuteCapFor, routeForwardRefusal,
 } from "../dialGuard";
@@ -382,6 +383,9 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
   }
 
   // ── Who is calling, re-checked uncached on every call ──────────────────────────────
+  // Plans as data (../plan.ts): "is anybody on a plan map" travels with the context read. Started
+  // here, BELOW the 911 block: an emergency call never asks about a plan at all.
+  const named = planNamedSoon(admin);
   const ctx = await callerContext(admin, identity.userId);
   if (!ctx || ctx.phone_level === "none") return response(say(SAY.noAccess), hangup());
   if (ctx.device_generation !== identity.generation) return response(say(SAY.retired), hangup());
@@ -428,9 +432,12 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
 
   // A demo business has its own, lower cap (the guard's demo_daily_minutes), as a cost backstop.
   const cap = minuteCapFor(guard.state, guard.mode, intVar(env.DAILY_MINUTE_CAP, 600, 0));
-  // All in one parallel round: the contact's tenant, today's minutes, and the wallet floor
-  // (wallet.ts: one RPC while PHONE_USAGE_METERS is on, none while it is off).
-  const [contactOk, used, wallet] = await Promise.all([
+  // All in one parallel round: the contact's tenant, today's minutes, the wallet floor
+  // (wallet.ts: one RPC while PHONE_USAGE_METERS is on, none while it is off), and the company's
+  // plan (../plan.ts: nothing at all unless the company is named, and never longer than
+  // VOICE_PLAN_MS, after which the call goes on by the rules above and the read is left to
+  // finish under waitUntil, so the next call finds its answer kept).
+  const [contactOk, used, wallet, plan] = await Promise.all([
     (async () => {
       if (!contactParam) return true;
       if (!UUID_RE.test(contactParam)) return false;
@@ -442,7 +449,16 @@ export async function outbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): 
     })(),
     cap > 0 ? minutesUsedToday(admin, ctx.client_id) : Promise.resolve(0),
     walletFloorCheck(env, admin, ctx.client_id),
+    planFor(admin, ctx.client_id, { named, timeoutMs: VOICE_PLAN_MS, keep: (read) => ec.waitUntil(read) }),
   ]);
+  // ── THE PLAN'S PHONE TAB (../plan.ts) ───────────────────────────────────────────────
+  // First of this round's answers, before any of them can write a row: a company whose plan map is
+  // enforced and has no `phone` tab hears what a company with the switch off hears, and like that
+  // refusal it leaves NO phone_calls row and dials nobody. Report mode refuses nothing; its row is
+  // written after the answer (waitUntil), because Twilio is waiting on this one.
+  const planSays = planVerdict(plan, PHONE_TAB);
+  if (planSays === "refuse") return response(say(SAY.phoneOff), hangup());
+  if (planSays === "report") ec.waitUntil(planReport(ctx.client_id, "outbound_call", plan!, PHONE_TAB));
   // A contact id from another tenant (an operator's stale tab, or a forged param) is refused
   // outright, never dialed "without the contact".
   if (!contactOk) return refuse("not_your_customer", SAY.notYourContact);
@@ -569,6 +585,8 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
   const admin = adminClient(env);
   const to = String(p.To ?? "");
   const from = String(p.From ?? "").slice(0, 40) || "unknown";
+  // Plans as data (../plan.ts): "is anybody on a plan map" travels with the route read.
+  const named = planNamedSoon(admin);
   const info = await routeForNumber(admin, to);
   if (!info) {
     ec.waitUntil(logFault({
@@ -577,6 +595,14 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
     }));
     return response(say(SAY.notInService), hangup());
   }
+  // The company's plan, started now so it runs beside the account check below, and never longer
+  // than VOICE_PLAN_MS (then: the old rules). Not asked at all inside the 911 callback window (the
+  // dispatcher is rung whatever any switch says), nor when the phone switch is already off (that
+  // call is going to voicemail anyway). While nobody is named this is no request. A read that
+  // passes the bound is left to finish under waitUntil, for the next call.
+  const planRead = !info.recent_emergency_user && info.phone_status === "on"
+    ? planFor(admin, info.client_id, { named, timeoutMs: VOICE_PLAN_MS, keep: (read) => ec.waitUntil(read) })
+    : null;
   // Workstream 2, phase 4: the number's business must live in the account the call came from. Only
   // while TWILIO_SUBACCOUNTS is "on" (TWILIO_WEBHOOK_ACCOUNT is set then and only then).
   // ⚠️ NEVER FOR THE 911 CALLBACK. Inside the 60 minutes after a 911 call from this number the
@@ -606,15 +632,24 @@ export async function inbound(env: Env, ec: Ctx, p: TwilioParams, t0: number): P
   // unannounced). Never for the 911 callback window, and never for an answer that is only
   // voicemail (the caller's message is a recording of its own). `armed` says the TwiML below
   // really rings someone on a recorded call: that, and only that, arms the call.
-  const rec: RecordingTwiml = !emergencyUser && info.phone_status === "on" && armedFor(env, info.recording)
+  // ── THE PLAN'S PHONE TAB (../plan.ts) ───────────────────────────────────────────────
+  // A company whose plan map is enforced and has no `phone` tab is answered exactly as one with
+  // the switch off: voicemail, never a dropped caller, and never inside the 911 callback window
+  // (planRead is null there). Report mode changes nothing and files a row after the answer.
+  const planAnswer = planRead ? await planRead : null;
+  const planSays = planVerdict(planAnswer, PHONE_TAB);
+  if (planSays === "report") ec.waitUntil(planReport(info.client_id, "inbound_call", planAnswer!, PHONE_TAB));
+  const planOff = planSays === "refuse";
+  const rec: RecordingTwiml = !emergencyUser && info.phone_status === "on" && !planOff && armedFor(env, info.recording)
     ? { armed: true, notice: announcementFor(env, info.recording) }
     : NOT_RECORDED;
   let armed = false;
 
-  if (!emergencyUser && info.phone_status !== "on") {
-    // The switch is off (paused, or the SQL panic button) but the number still points here:
-    // never drop the caller. Take a voicemail and keep the row, so the builder sees it when
-    // calling is back on. Nobody's app rings. The 911 callback skips the switch, like every block.
+  if (!emergencyUser && (info.phone_status !== "on" || planOff)) {
+    // The switch is off (paused, or the SQL panic button), or the plan has no phone tab, but the
+    // number still points here: never drop the caller. Take a voicemail and keep the row, so the
+    // builder sees it when calling is back on. Nobody's app rings. The 911 callback skips the
+    // switch and the plan, like every block.
     xml = voicemailTwiml(env, callId, info);
   } else if (emergencyUser) {
     // Plan section 14: for 60 minutes after a 911 call from this number, ring ONLY the person

@@ -451,7 +451,7 @@ async function extensionRefs(env: Env, userId: string, clientId: string | null):
 // ── GET /turn ───────────────────────────────────────────────────────────────────────
 
 export async function turn(env: Env, ec: Ctx, req: Request): Promise<Response> {
-  await requireCaller(env, req);
+  await requireCaller(env, req, { plan: false });
   try {
     return ok({ ice_servers: await ntsToken(env, 3600) });
   } catch (e) {

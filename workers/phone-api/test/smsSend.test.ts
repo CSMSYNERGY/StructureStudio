@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CUSTOMER, FakeNet, SUPABASE_URL, USER_A, appRequest, call, callerCtx, filter, jsonRes, makeEnv,
+  Auth, BUSINESS_NUMBER, CLIENT, CONTACT_1, CUSTOMER, FakeNet, SUPABASE_URL, USER_A, appRequest, blockPlan, call, callerCtx, filter, jsonRes, makeEnv,
 } from "./helpers";
 import { mapSmsRefusal } from "../src/routes/sms";
 import type { SmsOutcome } from "../../../supabase/functions/_shared/smsSend.ts";
@@ -99,6 +99,17 @@ describe("/sms/send with the shared send rules", () => {
     const { res, json } = await call(env, send(token));
     expect(res.status).toBe(502);
     expect(json.error).toEqual({ code: "twilio_error", message: "The text could not be sent (carrier code 21211). Try again, or call them instead." });
+  });
+
+  // Plans as data (src/plan.ts). The whole of it, with report mode and failed reads, is test/plan.test.ts.
+  it("a company whose enforced plan has no texting is refused before anything is claimed or sent, in a code and a sentence the apps already show", async () => {
+    const { net, token, env } = await setup();
+    blockPlan(net, { sms: "hidden" });
+    const { res, json } = await call(env, send(token));
+    expect(res.status).toBe(409);
+    expect(json.error).toEqual({ code: "number_not_registered", message: "Texting isn't part of your plan. Ask Structure Studio to add it." });
+    expect(net.writes("sms_messages")).toEqual([]);
+    expect(net.to(/Messages\.json$/)).toEqual([]);
   });
 });
 
