@@ -41,6 +41,7 @@ import { chargeInvoicePayment } from "../_shared/invoicePayment.ts";
 import { checkSession } from "../_shared/customerSession.ts";
 import { orderCentsFromSnapshot, taxFreeze } from "../_shared/estimateLines.ts";
 import { sendTenantEmail } from "../_shared/emailSend.ts";
+import { publicVerdict } from "../_shared/accessPublic.ts";
 
 const RATE_WINDOW_MS = 60_000;
 const RATE_PRICE_PER_IP = 30;
@@ -451,6 +452,14 @@ Deno.serve(withErrorLog("shop-checkout", async (req: Request) => {
     admin.from("client_configs").select("company_name").eq("client_id", clientId).maybeSingle(),
   ]);
   if (!shop?.enabled || !cfg) return json({ error: "This shop isn't available right now." }, 404);
+  // PLANS AS DATA, the public side (migration 389, _shared/accessPublic.ts). A company on the tab map
+  // whose Inventory tab is blocked stops OFFERING its shop: pricing a cart answers what a shop that
+  // is switched off answers (get_public_shop does the same for the page itself). Asked after the
+  // line above proved the company exists, and for PRICE ONLY. A purchase request somebody typed, a
+  // card payment and pay_setup are never asked: a plan stops new offers, not a sale in progress.
+  if (action === "price" && await publicVerdict(admin, clientId, "shop-checkout", "price", "inventory", req) === "refuse") {
+    return json({ error: "This shop isn't available right now." }, 404);
+  }
   if (shop.hide_all_prices) return json({ error: "Please contact us for pricing on these buildings." }, 409);
   const rule = { mode: String(shop.deposit_mode || "percent"), value: Number(shop.deposit_value) || 0 };
   const payInFull = rule.mode === "full" || (payInFullAsked && shop.allow_pay_in_full !== false);

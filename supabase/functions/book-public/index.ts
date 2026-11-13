@@ -3,6 +3,7 @@ import { createClient } from "jsr:@supabase/supabase-js@2";
 import { withErrorLog, logEdgeError } from "../_shared/logError.ts";
 import { clientIp } from "../_shared/adminGate.ts";
 import { hasPaidFeature } from "../_shared/featureCheck.ts";
+import { publicVerdict } from "../_shared/accessPublic.ts";
 import { availableSlots, widenBusy, parseDay } from "../_shared/meetingAvailability.ts";
 import { sendMeetingEmail, claimConfirmation, bumpIcsSequence } from "../_shared/meetingSend.ts";
 import { denoVideoEnv } from "../_shared/meetingVideo.ts";
@@ -236,6 +237,17 @@ Deno.serve(withErrorLog("book-public", async (req: Request) => {
   // about anyone's subscription: they get the same "not taking bookings" the page shows when
   // a host has switched themselves off.
   if (action === "availability" || action === "book") {
+    // PLANS AS DATA, the public side (migration 389, _shared/accessPublic.ts), asked FIRST. A company
+    // on the tab map whose Meetings tab is blocked stops OFFERING bookings, in the same not_found as
+    // everything above. The company is proven by now (get_public_booking answered for it), which the
+    // per-company cache needs. Not named, report mode and a failed read all answer "ok", and then
+    // the Customer Hub check below runs exactly as it did. lookup, reschedule and cancel are keyed
+    // on a booking's own token and never come through here: a customer can always read, move or
+    // give up a meeting they hold. (Picking the NEW time for a move is an availability call, so it
+    // does pass through this, exactly as it already passes through the Customer Hub check.)
+    if (await publicVerdict(admin, clientId, "book-public", action, "meetings", req) === "refuse") {
+      return json({ ok: false, error: "not_found" }, 404);
+    }
     let crmOn = false;
     try {
       crmOn = await hasPaidFeature(admin, clientId, "crm");

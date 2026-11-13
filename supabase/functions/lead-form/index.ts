@@ -5,6 +5,7 @@ import { clientIp } from "../_shared/adminGate.ts";
 import { smsConsentSentence } from "../_shared/smsConsentText.ts";
 import { checkSubmission, cleanDefinition, cleanSettings, consentTextOk, customPatch, isUuid, submissionNote, type CustomFieldDef, type FormDefinition } from "../_shared/leadForms.ts";
 import { companyTokens, loadTemplate, sendAutoreply, sendLeadAlert, teamEmails } from "../_shared/leadFormMail.ts";
+import { publicVerdict } from "../_shared/accessPublic.ts";
 
 // lead-form: the PUBLIC side of website lead forms (migration 325, Settings → Customer Hub →
 // Forms). verify_jwt = false: a builder's website visitor has no session. Three actions, all keyed
@@ -79,6 +80,15 @@ Deno.serve(withErrorLog("lead-form", async (req: Request) => {
     .select("id, client_id, name, status, published_definition, published_version, settings")
     .eq("client_id", clientId).eq("id", formId).maybeSingle();
   if (!form || form.status !== "published" || !form.published_definition) return json({ ok: false, reason: "not_found" }, 404);
+  // PLANS AS DATA, the public side (migration 389, _shared/accessPublic.ts). A company on the tab map
+  // whose Forms tab is blocked stops OFFERING its forms: load and start answer the same not_found an
+  // unpublished form answers, so nobody can tell which builders have the feature. Asked only here,
+  // after the form row proved the company exists (the read is cached by company id, and a made-up
+  // slug must never reach it). SUBMIT IS NEVER ASKED: a lead somebody has typed is taken whatever the
+  // plan says. Not named, report mode and a failed read all answer "ok": nothing changes.
+  if ((action === "load" || action === "start") && await publicVerdict(sb, clientId, "lead-form", action, "forms", req) === "refuse") {
+    return json({ ok: false, reason: "not_found" }, 404);
+  }
 
   const def = cleanDefinition(form.published_definition, SB_URL);
   const settings = cleanSettings(form.settings);
